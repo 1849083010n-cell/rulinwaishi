@@ -3,196 +3,217 @@ import pandas as pd
 import re
 import os
 from collections import Counter
-import folium  # 辅助显示基础地图，衔接QGIS结果
+import folium
 from streamlit_folium import st_folium
+import requests  # 新增：用于请求 GitHub 上的分章节文档
 
-# -------------------------- 1. 初始化配置（需根据本地环境修改） --------------------------
-# 本地《儒林外史》TXT文档路径（请替换为你的实际文件路径）
-LOCAL_RULIN_FILE = r"E:\Documents\儒林外史_全文.txt"  # Windows示例，macOS/Linux格式："/Users/xxx/儒林外史_全文.txt"
+# -------------------------- 1. 初始化配置（关键：GitHub 文档链接 + 地点设置） --------------------------
+# GitHub 分章节文档基础路径（替换为你的 GitHub 仓库实际路径，需用 raw 格式链接）
+# 格式说明：https://raw.githubusercontent.com/[你的GitHub用户名]/[仓库名]/[分支名]/rulinwaishi/articles/chxx.txt
+GITHUB_ARTICLE_BASE_URL = "https://raw.githubusercontent.com/你的GitHub用户名/你的仓库名/main/rulinwaishi/articles/ch"
 # 需统计的5个地点（作业指定：南京、苏州、杭州、北京、扬州）
 TARGET_LOCATIONS = ["南京", "苏州", "杭州", "北京", "扬州"]
-# 对应地点的CHGIS坐标（经纬度，适配QGIS与地图可视化，可从CHGIS数据中提取）
+# 对应地点的 CHGIS 坐标（适配 QGIS 与地图可视化，从 CHGIS 数据提取）
 LOCATION_COORDS = {
-    "南京": (32.0603, 118.7969),    # 明清江宁府坐标
-    "苏州": (31.2993, 120.6195),    # 明清苏州府坐标
-    "杭州": (30.2500, 120.1689),    # 明清杭州府坐标
-    "北京": (39.9042, 116.4074),    # 明清顺天府坐标
-    "扬州": (32.3897, 119.4129)     # 明清扬州府坐标
+    "南京": (32.0603, 118.7969),    # 明清江宁府
+    "苏州": (31.2993, 120.6195),    # 明清苏州府
+    "杭州": (30.2500, 120.1689),    # 明清杭州府
+    "北京": (39.9042, 116.4074),    # 明清顺天府
+    "扬州": (32.3897, 119.4129)     # 明清扬州府
 }
-# 本地QGIS项目文件路径（用于展示与下载，需替换为你的实际路径）
-QGIS_PROJECT_PATH = r"E:\QGIS_Projects\rulin_waishi_gis.qgz"
-# QGIS导出的地点频率地图图片路径（用于Streamlit展示）
-QGIS_MAP_IMAGE = r"E:\QGIS_Projects\location_frequency_map.png"
+# 本地/远程 QGIS 相关文件路径（QGIS 项目文件建议也上传 GitHub，用 raw 链接）
+QGIS_PROJECT_GITHUB_URL = "https://raw.githubusercontent.com/你的GitHub用户名/你的仓库名/main/QGIS_Projects/rulin_waishi_gis.qgz"
+QGIS_MAP_IMAGE_GITHUB_URL = "https://raw.githubusercontent.com/你的GitHub用户名/你的仓库名/main/QGIS_Projects/location_frequency_map.png"
 
 
-# -------------------------- 2. 核心函数：读取本地文档+统计10-30章地点频率 --------------------------
-def extract_chapters_10_to_30(file_path):
-    """读取本地《儒林外史》TXT，提取10-30章文本内容"""
-    if not os.path.exists(file_path):
-        st.error(f"本地文档未找到！请检查路径：{file_path}")
+# -------------------------- 2. 核心函数：从 GitHub 读取 ch10-ch30 文档 + 地点统计 --------------------------
+def fetch_github_chapter(chapter_num):
+    """根据章节号，从 GitHub 读取对应的 chxx.txt 文档内容"""
+    # 拼接完整 GitHub raw 链接（如 ch10.txt → .../ch10.txt）
+    github_url = f"{GITHUB_ARTICLE_BASE_URL}{chapter_num}.txt"
+    try:
+        # 发送请求获取文档内容（超时设为10秒，避免网络问题卡死）
+        response = requests.get(github_url, timeout=10)
+        response.raise_for_status()  # 若链接无效（404/500），抛出异常
+        # 处理编码：优先用 UTF-8，若乱码则尝试 GBK（中文文档常见编码）
+        if "charset" in response.headers:
+            encoding = response.headers["charset"]
+        else:
+            encoding = "utf-8" if "�" not in response.text else "gbk"
+        return response.text.encode(response.encoding).decode(encoding)
+    except requests.exceptions.HTTPError as e:
+        st.warning(f"章节 {chapter_num} 文档未找到（GitHub 链接无效）：{e}")
         return ""
-    
-    # 读取文档（假设章节以"第X章"开头，需根据你的文档格式调整匹配规则）
-    with open(file_path, "r", encoding="utf-8") as f:
-        full_text = f.read()
-    
-    # 正则匹配"第10章"到"第30章"的内容（需根据文档实际章节格式微调，如"第十回"需改为r"第[十拾]{1,2}回"）
-    chapter_pattern = r"第(\d+)章.*?(?=第(\d+)章|$)"  # 匹配"第X章"开头，到下一章或文档结束
-    chapters = re.findall(chapter_pattern, full_text, re.DOTALL)
-    
-    # 筛选10-30章内容
+    except requests.exceptions.Timeout:
+        st.error(f"章节 {chapter_num} 读取超时，请检查网络连接！")
+        return ""
+    except Exception as e:
+        st.error(f"章节 {chapter_num} 读取失败：{str(e)}")
+        return ""
+
+
+def extract_chapters_10_to_30_from_github():
+    """批量读取 GitHub 上的 ch10.txt 至 ch30.txt，整合为完整文本"""
     target_chapters_text = ""
-    for chapter in chapters:
-        try:
-            chapter_num = int(chapter[0])
-            if 10 <= chapter_num <= 30:
-                # 重新匹配该章节的完整内容（避免漏取）
-                chapter_full_pattern = re.compile(f"第{chapter_num}章.*?(?=第({chapter_num + 1}|$)章|$)", re.DOTALL)
-                chapter_content = chapter_full_pattern.search(full_text).group()
-                target_chapters_text += chapter_content + "\n\n"
-        except (ValueError, AttributeError):
-            continue
-    
+    # 遍历 10-30 章，逐个读取并拼接
+    for chapter_num in range(10, 31):
+        st.spinner(f"正在读取 GitHub 上的 ch{chapter_num}.txt...")
+        chapter_content = fetch_github_chapter(chapter_num)
+        if chapter_content:
+            # 为每章添加标识，便于后续追溯
+            target_chapters_text += f"=== 第{chapter_num}章 ===\n{chapter_content}\n\n"
+    # 检查是否成功读取到内容
     if not target_chapters_text:
-        st.warning("未提取到10-30章内容！请检查文档章节格式（如是否为'第X回'而非'第X章'）")
+        st.warning("未从 GitHub 读取到任何章节内容！请检查 GITHUB_ARTICLE_BASE_URL 是否正确。")
     return target_chapters_text
 
 
 def count_location_frequency(text, target_locations):
-    """统计目标地点在文本中的出现频率"""
+    """统计目标地点在文本中的出现频率（复用原逻辑，适配分章节文本）"""
     if not text:
         return pd.DataFrame(columns=["地点", "出现频率", "经度", "纬度"])
     
-    # 初始化计数器
     location_counter = Counter()
-    # 遍历每个地点，统计出现次数（不区分全角/半角，忽略大小写）
+    # 遍历每个地点，用正则精准匹配（避免匹配包含该地点的其他词汇）
     for location in target_locations:
-        # 正则匹配地点，允许前后有非文字字符（如标点、空格），避免匹配包含该地点的其他词
-        pattern = re.compile(re.escape(location), re.IGNORECASE)
+        pattern = re.compile(re.escape(location), re.IGNORECASE | re.DOTALL)
         count = len(pattern.findall(text))
         location_counter[location] = count
     
-    # 转换为DataFrame，添加坐标
+    # 转换为 DataFrame，添加 CHGIS 坐标（供 QGIS 使用）
     frequency_data = []
     for location in target_locations:
         freq = location_counter[location]
-        lon, lat = LOCATION_COORDS.get(location, (0.0, 0.0))  # 若坐标缺失，默认(0,0)
+        lon, lat = LOCATION_COORDS.get(location, (0.0, 0.0))
         frequency_data.append([location, freq, lon, lat])
     
     return pd.DataFrame(frequency_data, columns=["地点", "出现频率", "经度", "纬度"])
 
 
-# -------------------------- 3. Streamlit页面布局与交互逻辑 --------------------------
+# -------------------------- 3. Streamlit 页面布局与交互逻辑 --------------------------
 def main():
-    st.title("《儒林外史》10-30章地点频率分析与QGIS可视化")
-    st.markdown("### 作业二核心功能：本地文档读取 + 地点统计 + QGIS地理集成")
+    st.title("《儒林外史》ch10-ch30 地点分析（GitHub 文档 + QGIS 可视化）")
+    st.markdown("### 作业二功能：GitHub 分章节读取 + 地点统计 + QGIS 地理集成")
 
-    # 侧边栏：显示配置信息与操作提示
+    # 侧边栏：显示关键配置与操作提示
     with st.sidebar:
-        st.subheader("配置提示")
-        st.markdown(f"1. 本地文档路径：\n`{LOCAL_RULIN_FILE}`")
-        st.markdown(f"2. QGIS项目路径：\n`{QGIS_PROJECT_PATH}`")
-        st.warning("若文件路径错误，请修改代码中「初始化配置」部分的路径参数！")
+        st.subheader("GitHub 配置检查")
+        st.markdown(f"**分章节文档基础链接**：\n`{GITHUB_ARTICLE_BASE_URL}xx.txt`")
+        st.markdown(f"**QGIS 项目 GitHub 链接**：\n`{QGIS_PROJECT_GITHUB_URL}`")
+        st.warning("若无法读取文档，请确认：1. GitHub 仓库为公开；2. 链接路径（用户名/仓库名/分支）正确；3. 文档命名为 ch10.txt-ch30.txt。")
 
 
-    # -------------------------- 步骤1：读取并展示10-30章文本（可选） --------------------------
-    st.subheader("步骤1：提取10-30章文本")
-    if st.button("读取本地《儒林外史》10-30章"):
-        with st.spinner("正在读取文档并提取章节..."):
-            chapter_text = extract_chapters_10_to_30(LOCAL_RULIN_FILE)
+    # -------------------------- 步骤1：从 GitHub 读取 ch10-ch30 文本 --------------------------
+    st.subheader("步骤1：读取 GitHub 分章节文档")
+    if st.button("开始读取 ch10.txt - ch30.txt"):
+        with st.spinner("正在批量读取 GitHub 上的 21 个章节文档..."):
+            chapter_text = extract_chapters_10_to_30_from_github()
             if chapter_text:
-                # 显示前500字符预览（避免文本过长）
-                st.success("章节提取成功！以下为文本预览（前500字符）：")
-                st.text_area("10-30章文本预览", chapter_text[:500] + "...", height=200)
+                # 显示前 800 字符预览（分章节文本较长，控制预览长度）
+                st.success("所有章节读取成功！以下为文本预览（前800字符）：")
+                st.text_area("ch10-ch30 文本预览", chapter_text[:800] + "...", height=250)
+                # 存储文本到 session_state，避免后续重复请求 GitHub
+                st.session_state["chapter_text"] = chapter_text
             else:
-                st.error("章节提取失败，请检查文档格式或路径！")
+                st.error("章节读取失败，请检查 GitHub 链接或网络！")
 
 
-    # -------------------------- 步骤2：统计地点频率并展示 --------------------------
-    st.subheader("步骤2：地点出现频率统计")
-    chapter_text = extract_chapters_10_to_30(LOCAL_RULIN_FILE)  # 重新获取文本（确保最新）
-    frequency_df = count_location_frequency(chapter_text, TARGET_LOCATIONS)
+    # -------------------------- 步骤2：统计地点频率并生成 QGIS 可用数据 --------------------------
+    st.subheader("步骤2：地点出现频率统计（支持 QGIS 导入）")
+    # 从 session_state 获取已读取的文本（避免重复请求 GitHub）
+    chapter_text = st.session_state.get("chapter_text", "")
+    if not chapter_text and st.button("重新获取章节并统计频率"):
+        chapter_text = extract_chapters_10_to_30_from_github()
+        st.session_state["chapter_text"] = chapter_text
     
-    # 展示频率表格
-    st.dataframe(frequency_df, use_container_width=True, 
-                 column_config={"出现频率": st.column_config.NumberColumn("出现频率", format="%d次")})
-    
-    # 下载频率数据（CSV格式，用于QGIS导入）
-    csv_data = frequency_df.to_csv(index=False, encoding="utf-8-sig")
+    if chapter_text:
+        frequency_df = count_location_frequency(chapter_text, TARGET_LOCATIONS)
+        # 展示频率表格（突出频率数值）
+        st.dataframe(
+            frequency_df,
+            use_container_width=True,
+            column_config={
+                "出现频率": st.column_config.NumberColumn("出现频率（次）", format="%d"),
+                "经度": st.column_config.NumberColumn("经度", format="%.4f"),
+                "纬度": st.column_config.NumberColumn("纬度", format="%.4f")
+            }
+        )
+        
+        # 生成 CSV 文件（供 QGIS 直接导入关联 CHGIS 数据）
+        csv_data = frequency_df.to_csv(index=False, encoding="utf-8-sig")
+        st.download_button(
+            label="下载地点频率 CSV（QGIS 数据关联用）",
+            data=csv_data,
+            file_name="儒林外史_ch10-ch30_地点频率.csv",
+            mime="text/csv"
+        )
+    else:
+        st.info("请先点击「开始读取 ch10.txt - ch30.txt」获取章节内容！")
+
+
+    # -------------------------- 步骤3：QGIS 可视化集成（GitHub 远程文件） --------------------------
+    st.subheader("步骤3：QGIS 地理可视化展示")
+    st.markdown("#### 3.1 QGIS 生成的频率地图（GitHub 托管）")
+    # 尝试加载 GitHub 上的 QGIS 地图图片
+    try:
+        response = requests.get(QGIS_MAP_IMAGE_GITHUB_URL, timeout=8)
+        response.raise_for_status()
+        # 直接在 Streamlit 中显示远程图片
+        st.image(
+            response.content,
+            caption="QGIS 制作：地点出现频率地图（颜色越深频率越高）",
+            use_container_width=True
+        )
+    except Exception as e:
+        st.warning(f"无法加载 QGIS 地图图片：{str(e)}")
+        st.markdown(f"请手动访问链接查看：[QGIS 频率地图]({QGIS_MAP_IMAGE_GITHUB_URL})")
+
+    # 展示基础交互地图（基于 CHGIS 坐标，辅助验证 QGIS 数据）
+    st.markdown("#### 3.2 基础交互地图（与 QGIS 坐标一致）")
+    if chapter_text:
+        m = folium.Map(location=[32.0603, 118.7969], zoom_start=8, tiles="CartoDB positron")
+        # 为每个地点添加气泡标记（大小对应频率）
+        for _, row in frequency_df.iterrows():
+            location = row["地点"]
+            freq = row["出现频率"]
+            lon, lat = row["经度"], row["纬度"]
+            if lon != 0 and lat != 0:
+                folium.CircleMarker(
+                    location=[lat, lon],
+                    radius=freq * 6 if freq > 0 else 4,  # 频率越大，气泡越大
+                    color="#d35400",
+                    fill=True,
+                    fill_color="#d35400",
+                    fill_opacity=0.8,
+                    popup=f"<b>{location}</b><br>出现频率：{freq}次<br>坐标：({lat:.4f}, {lon:.4f})"
+                ).add_to(m)
+        st_folium(m, width=700, height=450)
+
+    # 提供 QGIS 项目文件下载（从 GitHub 直接获取）
+    st.markdown("#### 3.3 QGIS 项目文件（完整地理处理逻辑）")
     st.download_button(
-        label="下载地点频率CSV（用于QGIS数据关联）",
-        data=csv_data,
-        file_name="儒林外史_10-30章_地点频率.csv",
-        mime="text/csv"
+        label="下载 QGIS 项目文件（.qgz）",
+        data=requests.get(QGIS_PROJECT_GITHUB_URL).content,
+        file_name="儒林外史_ch10-ch30_地点分析.qgz",
+        mime="application/octet-stream"
     )
 
 
-    # -------------------------- 步骤3：QGIS集成与可视化展示 --------------------------
-    st.subheader("步骤3：QGIS地理可视化集成")
-    st.markdown("#### 3.1 QGIS地图预览（已导出图片）")
-    # 展示QGIS生成的频率地图
-    if os.path.exists(QGIS_MAP_IMAGE):
-        st.image(QGIS_MAP_IMAGE, caption="QGIS制作：《儒林外史》地点频率地图（颜色越深频率越高）", use_container_width=True)
-    else:
-        st.warning(f"QGIS地图图片未找到！请检查路径：{QGIS_MAP_IMAGE}")
-    
-    # 展示基础交互地图（衔接QGIS坐标，辅助查看）
-    st.markdown("#### 3.2 基础交互地图（基于CHGIS坐标）")
-    # 创建folium地图（中心设为南京，缩放级别8）
-    m = folium.Map(location=[32.0603, 118.7969], zoom_start=8, tiles="CartoDB positron")
-    # 为每个地点添加标记（气泡大小对应频率）
-    for _, row in frequency_df.iterrows():
-        location = row["地点"]
-        freq = row["出现频率"]
-        lon, lat = row["经度"], row["纬度"]
-        if lon != 0 and lat != 0:  # 仅添加有坐标的地点
-            # 气泡大小：频率×5（避免过小）
-            folium.CircleMarker(
-                location=[lat, lon],
-                radius=freq * 5 if freq > 0 else 3,  # 频率为0时显示最小气泡
-                color="#e74c3c",
-                fill=True,
-                fill_color="#e74c3c",
-                fill_opacity=0.7,
-                popup=f"<b>{location}</b><br>出现频率：{freq}次"
-            ).add_to(m)
-    # 在Streamlit中显示地图
-    st_folium(m, width=700, height=400)
-
-    # QGIS项目文件下载（供查看完整地理处理逻辑）
-    st.markdown("#### 3.3 QGIS项目文件下载")
-    if os.path.exists(QGIS_PROJECT_PATH):
-        with open(QGIS_PROJECT_PATH, "rb") as f:
-            st.download_button(
-                label="下载QGIS项目文件（.qgz）",
-                data=f,
-                file_name="儒林外史_地点分析.qgz",
-                mime="application/octet-stream"
-            )
-    else:
-        st.error(f"QGIS项目文件未找到！请检查路径：{QGIS_PROJECT_PATH}")
-
-
-    # -------------------------- 步骤4：作业要求补充（反思与链接） --------------------------
-    st.subheader("步骤4：作业要求补充")
+    # -------------------------- 步骤4：作业要求补充（研究问题 + 公开链接） --------------------------
+    st.subheader("步骤4：作业规范补充")
     st.markdown("""
-    1. **研究问题**：  
-       - 问题1：《儒林外史》10-30章中，哪个地点的学者活动频率最高？  
-       - 问题2：地点出现频率与小说中该地区的文化地位是否相关？  
-    2. **方法与工具**：  
-       - 文本处理：本地TXT读取 + Python正则提取（10-30章）  
-       - 频率统计：Python Counter + Pandas数据整理  
-       - GIS可视化：QGIS（CHGIS数据关联 + 分级渲染） + Streamlit展示  
-    3. **结果反思**：  
-       - 需结合小说内容分析频率差异（如“扬州”高频可能与盐商文化、文人聚集相关）  
-       - QGIS可视化优势：可直观对比不同地点的空间分布与频率关系  
-    """)
-
-    # 公开链接提示（需替换为你的GitHub/OneDrive链接）
-    st.markdown("""
-    > **公开数据链接**（作业要求）：  
-    > - 原始文本与频率数据：[GitHub仓库](https://github.com/你的用户名/你的仓库名)  
-    > - QGIS项目与地图文件：[OneDrive链接](https://1drv.ms/u/s!你的链接)  
+    1. **核心研究问题**：  
+       - 问题1：《儒林外史》ch10-ch30 中，5个目标地点的出现频率排序如何？  
+       - 问题2：高频地点（如扬州、南京）是否与小说中学者的核心活动场景高度重合？  
+    2. **QGIS 操作流程（关键步骤）**：  
+       ① 下载本页面的「地点频率 CSV」；  
+       ② 打开 QGIS → 导入 CSV（选择“经度/纬度”为坐标字段）；  
+       ③ 加载 CHGIS 明清政区矢量数据（如 chgis_v6_admin1.shp）；  
+       ④ 通过「属性表 → 连接」功能，将 CSV 与 CHGIS 数据关联；  
+       ⑤ 对关联图层设置「分级渲染」（按“出现频率”字段），导出地图图片并上传 GitHub。  
+    3. **公开数据链接（作业要求）**：  
+       - 分章节原文：[GitHub articles 文件夹](https://github.com/你的GitHub用户名/你的仓库名/tree/main/rulinwaishi/articles)  
+       - QGIS 项目与地图：[GitHub QGIS_Projects 文件夹](https://github.com/你的GitHub用户名/你的仓库名/tree/main/QGIS_Projects)  
     """)
 
 
