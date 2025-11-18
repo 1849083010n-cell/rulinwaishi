@@ -1,0 +1,12 @@
+# 核心Web框架：用于搭建Streamlit交互页面
+streamlit==1.35.0
+# 数据处理库：用于读取、整理地点频率数据（如DataFrame操作）
+pandas==2.2.2
+# 地图可视化库：用于在Streamlit中生成基础交互地图（衔接QGIS坐标）
+folium==0.16.0
+# Streamlit与folium的适配库：实现folium地图在Streamlit中的展示
+streamlit-folium==0.15.1
+# 字符编码处理库（可选，防止中文文档读取乱码）
+chardet==5.2.0
+# 正则表达式辅助库（可选，优化文本章节提取精度）
+regex==2024.5.15
