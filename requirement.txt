@@ -3,4 +3,5 @@ requests>=2.31.0
 pyvis>=0.3.2
 networkx>=3.1
 matplotlib>=3.7.2
-folium 
+folium
+streamlit-folium
