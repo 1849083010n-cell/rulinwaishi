@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
-import folium
-from streamlit_folium import st_folium
+import plotly.express as px
+import plotly.graph_objects as go
 
 # 1. 页面配置
 st.set_page_config(page_title="《儒林外史》GIS 地图", layout="wide")
@@ -43,31 +43,69 @@ col1, col2 = st.columns([2, 1])
 with col1:
     st.subheader("地理分布")
     
-    # 创建地图，以华东为中心
-    m = folium.Map(location=[34.0, 118.0], zoom_start=5)
-
-    # 向地图添加点
-    for index, row in df.iterrows():
-        # 创建带有详细信息的弹出窗口
-        popup_html = f"""
-        <b>{row['City']}</b><br>
-        <b>关键人物:</b> {row['Key_Characters']}<br>
-        <b>关键事件:</b> {row['Activity']}
-        """
-        
-        folium.CircleMarker(
-            location=[row['Lat'], row['Lon']],
-            radius=row['Frequency'] * 3,  # 根据频率缩放半径
-            popup=folium.Popup(popup_html, max_width=300),
-            tooltip=row['City'],
-            color="crimson",
-            fill=True,
-            fill_color="crimson",
-            fill_opacity=0.6
-        ).add_to(m)
-
-    # 渲染地图
-    st_folium(m, width=700, height=500)
+    # 创建悬停文本信息
+    df['Hover_Info'] = df.apply(
+        lambda row: f"<b>{row['City']}</b><br>"
+                   f"<b>关键人物:</b> {row['Key_Characters']}<br>"
+                   f"<b>关键事件:</b> {row['Activity']}<br>"
+                   f"<b>叙事频率:</b> {row['Frequency']}",
+        axis=1
+    )
+    
+    # 使用 Plotly 创建散点地图
+    fig = px.scatter_mapbox(
+        df,
+        lat="Lat",
+        lon="Lon",
+        size="Frequency",
+        size_max=30,
+        color="Frequency",
+        color_continuous_scale="reds",
+        hover_name="City",
+        hover_data={
+            "Key_Characters": True,
+            "Activity": True,
+            "Frequency": True,
+            "Lat": False,
+            "Lon": False
+        },
+        zoom=4,
+        height=500,
+        title="《儒林外史》关键地点分布"
+    )
+    
+    # 更新地图样式和布局
+    fig.update_layout(
+        mapbox_style="open-street-map",
+        mapbox=dict(
+            center=dict(lat=34.0, lon=118.0),
+            zoom=4
+        ),
+        margin={"r": 0, "t": 30, "l": 0, "b": 0},
+        hoverlabel=dict(
+            bgcolor="white",
+            font_size=12,
+            font_family="Arial"
+        )
+    )
+    
+    # 自定义标记样式
+    fig.update_traces(
+        marker=dict(
+            sizemode='diameter',
+            sizeref=0.5,  # 调整这个值来改变圆圈大小
+            opacity=0.7
+        ),
+        hovertemplate=(
+            "<b>%{hovertext}</b><br><br>"
+            "<b>关键人物:</b> %{customdata[0]}<br>"
+            "<b>关键事件:</b> %{customdata[1]}<br>"
+            "<b>叙事频率:</b> %{customdata[2]}<extra></extra>"
+        )
+    )
+    
+    # 显示地图
+    st.plotly_chart(fig, use_container_width=True)
 
 with col2:
     st.subheader("对比见解")
@@ -77,7 +115,7 @@ with col2:
     with tab1:
         st.write("**湖州 vs. 南京**")
         st.info("""
-        **湖州 (第 11-12 回):** 娄氏兄弟主持 *莺脰湖* 之会。这是理想主义和政治天真的，旨在寻求“隐逸之才”。
+        **湖州 (第 11-12 回):** 娄氏兄弟主持 *莺脰湖* 之会。这是理想主义和政治天真的，旨在寻求"隐逸之才"。
         
         **南京 (第 30 回):** 杜慎卿主持 *莫愁湖* 之会。这是唯美和颓废的，专注于优伶戏子而非道德哲学。
         """)
@@ -101,3 +139,13 @@ with col2:
 # 4. 数据表显示
 st.markdown("### 详细数据源")
 st.dataframe(df)
+
+# 5. 添加统计信息
+st.markdown("### 统计摘要")
+col3, col4, col5 = st.columns(3)
+with col3:
+    st.metric("总地点数", len(df))
+with col4:
+    st.metric("最高频率", df['Frequency'].max())
+with col5:
+    st.metric("平均频率", f"{df['Frequency'].mean():.1f}")
